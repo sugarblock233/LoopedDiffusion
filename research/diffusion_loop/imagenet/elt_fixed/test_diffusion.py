@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import copy
+
 import torch
 
 from .diffusion import alpha_sigma, clean_noise_from_v, ddpm_posterior_step
+from .model import FixedLoopDiT
 
 
 def test_shifted_cosine_is_variance_preserving_and_monotonic() -> None:
@@ -55,3 +58,36 @@ def test_ddpm_step_matches_closed_form_posterior_mean() -> None:
         * noisy
     )
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-6)
+
+
+def test_selective_activation_checkpointing_preserves_output_and_gradients() -> None:
+    torch.manual_seed(23)
+    reference = FixedLoopDiT(
+        latent_size=4,
+        patch_size=2,
+        channels=2,
+        classes=7,
+        hidden_size=32,
+        heads=4,
+        mlp_ratio=2,
+        unique_blocks=2,
+        loops=3,
+    )
+    for parameter in reference.parameters():
+        torch.nn.init.normal_(parameter, std=0.02)
+    checkpointed = copy.deepcopy(reference)
+    checkpointed.activation_checkpoint_every = 2
+
+    noisy = torch.randn(3, 2, 4, 4)
+    timestep = torch.rand(3)
+    labels = torch.tensor([0, 3, 6])
+    expected = reference(noisy, timestep, labels)
+    actual = checkpointed(noisy, timestep, labels)
+    torch.testing.assert_close(actual, expected)
+
+    expected.square().mean().backward()
+    actual.square().mean().backward()
+    for expected_parameter, actual_parameter in zip(
+        reference.parameters(), checkpointed.parameters(), strict=True
+    ):
+        torch.testing.assert_close(actual_parameter.grad, expected_parameter.grad)

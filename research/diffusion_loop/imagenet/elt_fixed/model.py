@@ -5,6 +5,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 
 def scalar_embedding(value: torch.Tensor, dim: int, max_period: float = 10_000.0) -> torch.Tensor:
@@ -120,12 +121,15 @@ class FixedLoopDiT(nn.Module):
         mlp_ratio: float = 4.0,
         unique_blocks: int = 2,
         loops: int = 12,
+        activation_checkpoint_every: int = 0,
     ) -> None:
         super().__init__()
         if latent_size % patch_size:
             raise ValueError("latent size must be divisible by patch size")
         if unique_blocks < 1 or loops < 1:
             raise ValueError("unique_blocks and loops must be positive")
+        if activation_checkpoint_every < 0:
+            raise ValueError("activation_checkpoint_every must be non-negative")
         self.latent_size = latent_size
         self.patch_size = patch_size
         self.channels = channels
@@ -134,6 +138,7 @@ class FixedLoopDiT(nn.Module):
         self.mlp_ratio = mlp_ratio
         self.unique_blocks = unique_blocks
         self.loops = loops
+        self.activation_checkpoint_every = activation_checkpoint_every
         self.grid_size = latent_size // patch_size
 
         self.patch_embed = nn.Conv2d(channels, hidden_size, patch_size, stride=patch_size)
@@ -197,9 +202,20 @@ class FixedLoopDiT(nn.Module):
         state = self.patch_embed(noisy).flatten(2).transpose(1, 2)
         state = state + self.position_embedding.to(device=state.device, dtype=state.dtype)
         condition = self.time_embed(1000.0 * timestep) + self.class_embed(labels)
+        application_index = 0
         for _ in range(self.loops):
             for block in self.blocks:
-                state = block(state, condition)
+                application_index += 1
+                should_checkpoint = (
+                    self.training
+                    and torch.is_grad_enabled()
+                    and self.activation_checkpoint_every > 0
+                    and application_index % self.activation_checkpoint_every == 0
+                )
+                if should_checkpoint:
+                    state = checkpoint(block, state, condition, use_reentrant=False)
+                else:
+                    state = block(state, condition)
         return self.unpatchify(self.final(state, condition))
 
     def metadata(self) -> dict[str, int | float | str]:
@@ -216,6 +232,7 @@ class FixedLoopDiT(nn.Module):
             "unique_blocks": self.unique_blocks,
             "loops": self.loops,
             "effective_depth": self.effective_depth,
+            "activation_checkpoint_every": self.activation_checkpoint_every,
             "stored_parameters": sum(parameter.numel() for parameter in self.parameters()),
             "intermediate_supervision": "none",
             "loop_embedding": "none",

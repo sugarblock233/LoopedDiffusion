@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mlp-ratio", type=float, default=4.0)
     parser.add_argument("--unique-blocks", type=int, default=2)
     parser.add_argument("--loops", type=int, default=12)
+    parser.add_argument("--activation-checkpoint-every", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--checkpoint-every", type=int, default=5_000)
@@ -124,6 +125,7 @@ def main() -> None:
         mlp_ratio=args.mlp_ratio,
         unique_blocks=args.unique_blocks,
         loops=args.loops,
+        activation_checkpoint_every=args.activation_checkpoint_every,
     ).to(device)
     ema = copy.deepcopy(model).to(device).eval()
     ema.requires_grad_(False)

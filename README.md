@@ -105,7 +105,8 @@ Defaults:
 - train to 400K steps;
 - one visible H200;
 - global batch 512;
-- micro-batch 128 and four gradient-accumulation passes;
+- micro-batch 512 and one optimizer pass;
+- selective activation checkpointing every four recurrent block calls;
 - save every 10K steps for Slurm preemption recovery.
 
 The run directory's `latest.pt` is preferred automatically after the first new
@@ -124,9 +125,18 @@ TARGET_STEPS=200100 CHECKPOINT_EVERY=100 \
 ```
 
 After the smoke test, use a fresh official run directory starting from the
-unaltered 200K checkpoint. If the H200 has ample memory, `MICRO_BATCH=256`
-reduces accumulation from four passes to two; benchmark it before the long
-run. Preserve `GLOBAL_BATCH=512` for comparison with the existing baseline.
+unaltered 200K checkpoint. The high-occupancy default uses real activations,
+not an unused reservation tensor, and is expected to peak around 105--125 GiB
+on an H200. The exact value depends on the PyTorch/CUDA build and is recorded
+as `peak_memory_gib` in `train.jsonl` after the first 50 steps.
+
+`ACTIVATION_CHECKPOINT_EVERY` controls the memory/compute tradeoff. A larger
+value checkpoints fewer of the 24 recurrent block calls and therefore uses
+more memory. If the default value `4` is too close to OOM, use `3`; if the
+measured allocation is below the cluster requirement and headroom remains,
+try `6`. The conservative fallback is
+`MICRO_BATCH=256 ACTIVATION_CHECKPOINT_EVERY=0`. Preserve
+`GLOBAL_BATCH=512` for comparison with the existing baseline.
 
 ## Direct launcher
 

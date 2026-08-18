@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Override these variables as needed: PYTHON, DATA_ROOT, RUN_ROOT,
 # INITIAL_CHECKPOINT, TARGET_STEPS, GLOBAL_BATCH, MICRO_BATCH, WORKERS,
-# CHECKPOINT_EVERY, and REQUIRE_H200.
+# CHECKPOINT_EVERY, ACTIVATION_CHECKPOINT_EVERY, and REQUIRE_H200.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
 DATA_ROOT="${DATA_ROOT:-$ROOT/data/imagenet_sd14_latents}"
@@ -11,9 +11,10 @@ RUN_ROOT="${RUN_ROOT:-$ROOT/runs/elt_fixed_2n12l_d1024_seed0}"
 INITIAL_CHECKPOINT="${INITIAL_CHECKPOINT:-$ROOT/checkpoints/checkpoint-0200000.pt}"
 TARGET_STEPS="${TARGET_STEPS:-400000}"
 GLOBAL_BATCH="${GLOBAL_BATCH:-512}"
-MICRO_BATCH="${MICRO_BATCH:-128}"
+MICRO_BATCH="${MICRO_BATCH:-512}"
 WORKERS="${WORKERS:-8}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10000}"
+ACTIVATION_CHECKPOINT_EVERY="${ACTIVATION_CHECKPOINT_EVERY:-4}"
 REQUIRE_H200="${REQUIRE_H200:-1}"
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -28,8 +29,8 @@ if (( GLOBAL_BATCH < 1 || MICRO_BATCH < 1 || GLOBAL_BATCH % MICRO_BATCH != 0 ));
   echo "GLOBAL_BATCH must be divisible by MICRO_BATCH for one GPU" >&2
   exit 1
 fi
-if (( TARGET_STEPS <= 200000 || CHECKPOINT_EVERY < 1 )); then
-  echo "TARGET_STEPS must exceed 200000 and CHECKPOINT_EVERY must be positive" >&2
+if (( TARGET_STEPS <= 200000 || CHECKPOINT_EVERY < 1 || ACTIVATION_CHECKPOINT_EVERY < 0 )); then
+  echo "invalid target step or checkpoint interval" >&2
   exit 1
 fi
 
@@ -78,6 +79,7 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
   --mlp-ratio 4 \
   --unique-blocks 2 \
   --loops 12 \
+  --activation-checkpoint-every "$ACTIVATION_CHECKPOINT_EVERY" \
   --image-resolution 256 \
   --noise-resolution 64 \
   --logsnr-min -15 \
