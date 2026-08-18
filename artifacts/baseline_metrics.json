@@ -1,0 +1,17 @@
+{
+  "architecture": "fixed_loop_dit_2n12l_d1024",
+  "fid_protocol": {
+    "cfg_scale": 3.0,
+    "metric": "ADM TensorFlow InceptionV3 FID",
+    "num_samples": 50000,
+    "sampler": "ancestral_ddpm",
+    "sampling_steps": 512,
+    "weights": "ema"
+  },
+  "measurements": {
+    "50000": 54.16431538067269,
+    "100000": 26.52463400584196,
+    "200000": 15.824326720053875
+  },
+  "stored_parameters": 42250256
+}
