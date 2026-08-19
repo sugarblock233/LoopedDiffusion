@@ -64,23 +64,24 @@ python scripts/validate_checkpoint.py checkpoints/checkpoint-0200000.pt
 The expected SHA-256 is recorded in `checkpoints/SHA256SUMS`. The download is
 resumable.
 
-The 210K and 215K continuation checkpoints are available from the same
-release. Select either one by step, then pass it as the initial checkpoint when
+The 210K, 215K, and 220K continuation checkpoints are available from the same
+release. Select one by step, then pass it as the initial checkpoint when
 starting a new run directory:
 
 ```bash
-CHECKPOINT_STEP=215000 bash scripts/download_checkpoint.sh
-python scripts/validate_checkpoint.py checkpoints/checkpoint-0215000.pt
+CHECKPOINT_STEP=220000 bash scripts/download_checkpoint.sh
+python scripts/validate_checkpoint.py checkpoints/checkpoint-0220000.pt
 
-INITIAL_CHECKPOINT="$PWD/checkpoints/checkpoint-0215000.pt" \
+INITIAL_CHECKPOINT="$PWD/checkpoints/checkpoint-0220000.pt" \
 DATA_ROOT="$SCRATCH/looped-diffusion/imagenet_sd14_latents" \
 RUN_ROOT="$SCRATCH/looped-diffusion/runs/fixed_2n12l_d1024_seed0" \
   sbatch --partition=<h200-partition> scripts/train_h200_single.sbatch
 ```
 
-Use `CHECKPOINT_STEP=210000` and `checkpoint-0210000.pt` instead to resume from
-210K. If `RUN_ROOT/latest.pt` already exists, the launcher intentionally
-prefers that newer run-local checkpoint over `INITIAL_CHECKPOINT`.
+Use `CHECKPOINT_STEP=210000` or `CHECKPOINT_STEP=215000` to select an earlier
+continuation checkpoint. If `RUN_ROOT/latest.pt` already exists, the launcher
+intentionally prefers that newer run-local checkpoint over
+`INITIAL_CHECKPOINT`.
 
 ## 3. Prepare ImageNet latent shards
 
