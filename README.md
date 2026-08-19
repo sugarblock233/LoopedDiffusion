@@ -107,7 +107,7 @@ Defaults:
 - global batch 512;
 - micro-batch 512 and one optimizer pass;
 - selective activation checkpointing every four recurrent block calls;
-- save every 10K steps for Slurm preemption recovery.
+- save every 5K steps for Slurm preemption recovery.
 
 The run directory's `latest.pt` is preferred automatically after the first new
 checkpoint. Re-submitting the same command therefore resumes the newest saved

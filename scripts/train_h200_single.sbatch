@@ -11,7 +11,11 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  ROOT="$(cd "$SLURM_SUBMIT_DIR" && pwd)"
+else
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 cd "$ROOT"
 
 if [[ -z "${DATA_ROOT:-}" ]]; then
@@ -24,7 +28,7 @@ export RUN_ROOT="${RUN_ROOT:-$ROOT/runs/elt_fixed_2n12l_d1024_seed0}"
 export TARGET_STEPS="${TARGET_STEPS:-400000}"
 export GLOBAL_BATCH="${GLOBAL_BATCH:-512}"
 export MICRO_BATCH="${MICRO_BATCH:-512}"
-export CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10000}"
+export CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-5000}"
 export ACTIVATION_CHECKPOINT_EVERY="${ACTIVATION_CHECKPOINT_EVERY:-4}"
 export WORKERS="${WORKERS:-8}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
