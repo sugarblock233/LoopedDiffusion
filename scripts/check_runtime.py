@@ -19,28 +19,41 @@ def main() -> None:
     if count != args.visible_gpus:
         raise SystemExit(f"expected {args.visible_gpus} visible GPU, found {count}")
 
-    properties = torch.cuda.get_device_properties(0)
-    name = properties.name
-    if args.require_h200 and "H200" not in name.upper():
-        raise SystemExit(f"expected an H200, found {name}")
-    if not torch.cuda.is_bf16_supported():
-        raise SystemExit(f"BF16 is not supported by {name}")
-
-    left = torch.randn((1024, 1024), device="cuda", dtype=torch.bfloat16)
-    right = torch.randn((1024, 1024), device="cuda", dtype=torch.bfloat16)
-    result = left @ right
-    torch.cuda.synchronize()
-    if not torch.isfinite(result.float()).all():
-        raise SystemExit("BF16 CUDA matmul produced non-finite output")
+    devices = []
+    for index in range(count):
+        properties = torch.cuda.get_device_properties(index)
+        name = properties.name
+        if args.require_h200 and "H200" not in name.upper():
+            raise SystemExit(f"expected H200 at visible GPU {index}, found {name}")
+        with torch.cuda.device(index):
+            if not torch.cuda.is_bf16_supported():
+                raise SystemExit(f"BF16 is not supported by {name}")
+            left = torch.randn((1024, 1024), device="cuda", dtype=torch.bfloat16)
+            right = torch.randn((1024, 1024), device="cuda", dtype=torch.bfloat16)
+            result = left @ right
+            torch.cuda.synchronize(index)
+            if not torch.isfinite(result.float()).all():
+                raise SystemExit(
+                    f"BF16 CUDA matmul produced non-finite output on visible GPU {index}"
+                )
+        devices.append(
+            {
+                "compute_capability": list(torch.cuda.get_device_capability(index)),
+                "index": index,
+                "memory_gib": round(properties.total_memory / 1024**3, 2),
+                "name": name,
+            }
+        )
 
     print(
         json.dumps(
             {
                 "bf16": True,
-                "compute_capability": list(torch.cuda.get_device_capability(0)),
+                "compute_capability": devices[0]["compute_capability"],
                 "cuda": torch.version.cuda,
-                "device": name,
-                "memory_gib": round(properties.total_memory / 1024**3, 2),
+                "device": devices[0]["name"],
+                "devices": devices,
+                "memory_gib": devices[0]["memory_gib"],
                 "torch": torch.__version__,
                 "visible_gpus": count,
             },

@@ -101,38 +101,76 @@ The downloader uses the public
 if the destination environment requires authentication. Existing parquet and
 latent shards are reused.
 
-## 4. Submit one H200
+## 4. Submit on H200s
 
 Create the Slurm output directory before submission and pass the cluster's
-partition, account, or H200 constraint on the `sbatch` command line:
+partition and account on the command line. Choose the GPU count at submission
+time; the same launcher supports 1, 2, 4, or 8 GPUs:
 
 ```bash
-mkdir -p slurm-logs
-
 DATA_ROOT="$SCRATCH/looped-diffusion/imagenet_sd14_latents" \
 RUN_ROOT="$SCRATCH/looped-diffusion/runs/fixed_2n12l_d1024_seed0" \
-  sbatch --partition=<h200-partition> scripts/train_h200_single.sbatch
+  bash scripts/submit_h200.sh 1 --partition=<h200-partition>
+
+# The same baseline continuation on four H200s:
+DATA_ROOT="$SCRATCH/looped-diffusion/imagenet_sd14_latents" \
+RUN_ROOT="$SCRATCH/looped-diffusion/runs/fixed_2n12l_d1024_seed0" \
+  bash scripts/submit_h200.sh 4 --partition=<h200-partition>
 ```
 
-Some clusters select the GPU type with `--constraint=h200` or
-`--gres=gpu:h200:1` instead. Check `sinfo` or ask the administrator rather than
-adding incompatible directives to the generic batch file.
+The helper requests `--gpus-per-node=h200:N` by default. For a cluster that
+uses GRES syntax, set `GPU_REQUEST_STYLE=gres`. Set `GPU_TYPE=''` and pass
+`--constraint=h200` when GPU type is selected by a constraint instead:
+
+```bash
+GPU_REQUEST_STYLE=gres bash scripts/submit_h200.sh 4 --partition=<partition>
+GPU_TYPE='' bash scripts/submit_h200.sh 4 --partition=<partition> --constraint=h200
+```
+
+Use `DRY_RUN=1` to print the complete `sbatch` command without submitting it.
+The older `train_h200_single.sbatch` entry point remains available for
+backward compatibility.
 
 Defaults:
 
 - resume from `checkpoints/checkpoint-0200000.pt`;
 - train to 400K steps;
-- one visible H200;
 - global batch 512;
-- micro-batch 512 and one optimizer pass;
-- selective activation checkpointing every four recurrent block calls;
+- one optimizer pass per step, with micro-batch set to `512 / GPU count`;
+- eight data-loader workers in total, divided across ranks to retain the
+  original baseline's uniform 40-shard partition;
+- selective activation checkpointing on a 512 micro-batch and no checkpointing
+  on smaller per-GPU micro-batches;
 - save every 5K steps for Slurm preemption recovery.
 
-The run directory's `latest.pt` is preferred automatically after the first new
-checkpoint. Re-submitting the same command therefore resumes the newest saved
-step. A single H200 keeps the same global batch and optimizer state, but a
-different GPU world size is not bitwise identical to the original four-A100
-trajectory.
+In the default `BATCH_POLICY=fixed` mode, GPU count only changes how the fixed
+global batch is divided:
+
+| H200s | Per-GPU micro-batch | Workers per rank | Global batch |
+| ---: | ---: | ---: | ---: |
+| 1 | 512 | 8 | 512 |
+| 2 | 256 | 4 | 512 |
+| 4 | 128 | 2 | 512 |
+| 8 | 64 | 1 | 512 |
+
+This keeps step count, sample count, learning rate, and EMA semantics aligned
+with the existing baseline. The GPU count must divide 512; if three GPUs are
+idle, request two rather than silently changing the experiment. Custom
+`WORKERS` values are accepted only when `WORKERS * GPU count` divides the 40
+latent shards evenly, which prevents world-size-dependent shard reweighting.
+
+The run directory's `latest.pt` is preferred automatically. After one job has
+exited, re-submit with a different GPU count and the new job resumes the newest
+saved step. Do not overlap jobs that use the same `RUN_ROOT`; the launcher also
+uses an advisory lock to catch accidental overlap. Changing DDP world size is
+not bitwise identical because rank-local RNG and batch ordering change, but the
+optimizer and EMA state remain loadable. A running Slurm allocation cannot
+grow or shrink in place.
+
+If card availability changes often, reduce `CHECKPOINT_EVERY`, wait for a new
+checkpoint, cancel the old job, then submit the same `RUN_ROOT` with the new
+count. For example, `CHECKPOINT_EVERY=1000` limits a forced cancellation to at
+most 1K lost steps.
 
 For a short operational test:
 
@@ -140,7 +178,7 @@ For a short operational test:
 DATA_ROOT="$SCRATCH/looped-diffusion/imagenet_sd14_latents" \
 RUN_ROOT="$SCRATCH/looped-diffusion/runs/fixed_smoke" \
 TARGET_STEPS=200100 CHECKPOINT_EVERY=100 \
-  sbatch --partition=<h200-partition> scripts/train_h200_single.sbatch
+  bash scripts/submit_h200.sh 1 --partition=<h200-partition>
 ```
 
 After the smoke test, use a fresh official run directory starting from the
@@ -157,16 +195,39 @@ try `6`. The conservative fallback is
 `MICRO_BATCH=256 ACTIVATION_CHECKPOINT_EVERY=0`. Preserve
 `GLOBAL_BATCH=512` for comparison with the existing baseline.
 
-## Direct launcher
+### High-occupancy throughput mode
 
-Inside an allocated one-GPU Slurm shell, or on a standalone H200:
+Fixed global batch inevitably lowers per-GPU memory use as more data-parallel
+GPUs are added. If the cluster requires high HBM occupancy on every H200, the
+launcher can instead keep micro-batch 512 on every GPU:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
-DATA_ROOT=/path/to/imagenet_sd14_latents \
-RUN_ROOT=/path/to/run \
-  bash scripts/train_h200_single.sh
+DATA_ROOT="$SCRATCH/looped-diffusion/imagenet_sd14_latents" \
+RUN_ROOT="$SCRATCH/looped-diffusion/runs/fixed_throughput_gb2048" \
+BATCH_POLICY=throughput ALLOW_GLOBAL_BATCH_CHANGE=1 \
+  bash scripts/submit_h200.sh 4 --partition=<h200-partition>
 ```
 
-All paths and operational settings can be overridden with environment
-variables documented at the top of `scripts/train_h200_single.sh`.
+On four GPUs this means global batch 2048. It is intentionally guarded and
+must use a separate run directory: optimizer-update count, samples per step,
+and EMA timescale no longer match the baseline, even though the checkpoint is
+technically loadable. Do not report its 400K result as the fixed-batch 400K
+baseline. A run contract prevents changing GPU count inside one throughput-mode
+`RUN_ROOT`, because that would silently change global batch; use another run
+directory for each throughput configuration.
+
+## Direct launcher
+
+Inside an allocated one-node Slurm shell, or on a standalone H200 node:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DATA_ROOT=/path/to/imagenet_sd14_latents \
+RUN_ROOT=/path/to/run \
+NUM_GPUS=4 \
+  bash scripts/train_h200.sh
+```
+
+`NUM_GPUS=auto` detects all GPUs visible to PyTorch. Limit
+`CUDA_VISIBLE_DEVICES` first if the allocation exposes devices that should not
+belong to this run.
