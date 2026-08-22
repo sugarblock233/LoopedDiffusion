@@ -64,15 +64,15 @@ python scripts/validate_checkpoint.py checkpoints/checkpoint-0200000.pt
 The expected SHA-256 is recorded in `checkpoints/SHA256SUMS`. The download is
 resumable.
 
-The 210K, 215K, 220K, 225K, 230K, 235K, and 240K continuation checkpoints are
+The 210K through 265K continuation checkpoints, saved every 5K steps, are
 available from the same release. Select one by step, then pass it as the
 initial checkpoint when starting a new run directory:
 
 ```bash
-CHECKPOINT_STEP=240000 bash scripts/download_checkpoint.sh
-python scripts/validate_checkpoint.py checkpoints/checkpoint-0240000.pt
+CHECKPOINT_STEP=265000 bash scripts/download_checkpoint.sh
+python scripts/validate_checkpoint.py checkpoints/checkpoint-0265000.pt
 
-INITIAL_CHECKPOINT="$PWD/checkpoints/checkpoint-0240000.pt" \
+INITIAL_CHECKPOINT="$PWD/checkpoints/checkpoint-0265000.pt" \
 DATA_ROOT="$SCRATCH/looped-diffusion/imagenet_sd14_latents" \
 RUN_ROOT="$SCRATCH/looped-diffusion/runs/fixed_2n12l_d1024_seed0" \
   sbatch --partition=<h200-partition> scripts/train_h200_single.sbatch
