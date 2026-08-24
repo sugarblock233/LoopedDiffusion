@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Multi-H200 launcher. NUM_GPUS may be "auto" or the exact number of GPUs
-# allocated to this one-node job. See README.md for the batch-policy tradeoff.
+# Multi-node H200 launcher. Slurm fills the topology variables through
+# train_h200.sbatch; they may also be supplied directly for a manual launch.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
 DATA_ROOT="${DATA_ROOT:-$ROOT/data/imagenet_sd14_latents}"
 RUN_ROOT="${RUN_ROOT:-$ROOT/runs/elt_fixed_2n12l_d1024_seed0}"
 INITIAL_CHECKPOINT="${INITIAL_CHECKPOINT:-$ROOT/checkpoints/checkpoint-0200000.pt}"
 TARGET_STEPS="${TARGET_STEPS:-400000}"
-NUM_GPUS="${NUM_GPUS:-auto}"
+GPUS_PER_NODE="${GPUS_PER_NODE:-${NUM_GPUS:-auto}}"
+NNODES="${NNODES:-${SLURM_NNODES:-1}}"
+NODE_RANK="${NODE_RANK:-${SLURM_NODEID:-0}}"
+MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+MASTER_PORT="${MASTER_PORT:-29500}"
 BATCH_POLICY="${BATCH_POLICY:-fixed}"
 GLOBAL_BATCH="${GLOBAL_BATCH:-auto}"
 MICRO_BATCH="${MICRO_BATCH:-auto}"
@@ -37,37 +41,44 @@ if ! is_positive_integer "$DETECTED_GPUS"; then
   echo "no CUDA GPUs are visible to PyTorch" >&2
   exit 1
 fi
-if [[ "$NUM_GPUS" == "auto" ]]; then
-  NUM_GPUS="$DETECTED_GPUS"
-elif ! is_positive_integer "$NUM_GPUS"; then
-  echo "NUM_GPUS must be 'auto' or a positive integer" >&2
+if [[ "$GPUS_PER_NODE" == "auto" ]]; then
+  GPUS_PER_NODE="$DETECTED_GPUS"
+elif ! is_positive_integer "$GPUS_PER_NODE"; then
+  echo "GPUS_PER_NODE must be 'auto' or a positive integer" >&2
   exit 1
-elif (( NUM_GPUS != DETECTED_GPUS )); then
-  echo "NUM_GPUS=$NUM_GPUS but PyTorch sees $DETECTED_GPUS GPUs" >&2
+elif (( GPUS_PER_NODE != DETECTED_GPUS )); then
+  echo "GPUS_PER_NODE=$GPUS_PER_NODE but PyTorch sees $DETECTED_GPUS GPUs" >&2
   exit 1
 fi
+if ! is_positive_integer "$NNODES"; then
+  echo "NNODES must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$NODE_RANK" =~ ^[0-9]+$ ]] || (( NODE_RANK >= NNODES )); then
+  echo "NODE_RANK must be an integer in [0, NNODES)" >&2
+  exit 1
+fi
+if [[ -z "$MASTER_ADDR" ]] || ! [[ "$MASTER_PORT" =~ ^[1-9][0-9]*$ ]] || (( MASTER_PORT > 65535 )); then
+  echo "MASTER_ADDR must be non-empty and MASTER_PORT must be in [1, 65535]" >&2
+  exit 1
+fi
+WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
 
 if [[ "$WORKERS" == "auto" ]]; then
   if ! is_positive_integer "$TOTAL_DATA_WORKERS"; then
     echo "TOTAL_DATA_WORKERS must be a positive integer" >&2
     exit 1
   fi
-  if (( TOTAL_DATA_WORKERS % NUM_GPUS != 0 )); then
-    echo "TOTAL_DATA_WORKERS=$TOTAL_DATA_WORKERS is not divisible by NUM_GPUS=$NUM_GPUS" >&2
-    exit 1
+  WORKERS=$((TOTAL_DATA_WORKERS / WORLD_SIZE))
+  if (( WORKERS < 1 )); then
+    WORKERS=1
   fi
-  WORKERS=$((TOTAL_DATA_WORKERS / NUM_GPUS))
 fi
 if ! is_positive_integer "$WORKERS"; then
   echo "WORKERS must be 'auto' or a positive integer" >&2
   exit 1
 fi
-DATA_PARTITIONS=$((WORKERS * NUM_GPUS))
-if (( 40 % DATA_PARTITIONS != 0 )); then
-  echo "40 latent shards must be divisible by WORKERS * NUM_GPUS=$DATA_PARTITIONS" >&2
-  echo "use the default auto workers or choose a divisor of 40" >&2
-  exit 1
-fi
+DATA_PARTITIONS=$((WORKERS * WORLD_SIZE))
 
 if ! is_positive_integer "$PER_GPU_BATCH"; then
   echo "PER_GPU_BATCH must be a positive integer" >&2
@@ -83,11 +94,11 @@ case "$BATCH_POLICY" in
       exit 1
     fi
     if [[ "$MICRO_BATCH" == "auto" ]]; then
-      if (( GLOBAL_BATCH % NUM_GPUS != 0 )); then
-        echo "GLOBAL_BATCH=$GLOBAL_BATCH is not divisible by NUM_GPUS=$NUM_GPUS" >&2
+      if (( GLOBAL_BATCH % WORLD_SIZE != 0 )); then
+        echo "GLOBAL_BATCH=$GLOBAL_BATCH is not divisible by WORLD_SIZE=$WORLD_SIZE" >&2
         exit 1
       fi
-      MICRO_BATCH=$((GLOBAL_BATCH / NUM_GPUS))
+      MICRO_BATCH=$((GLOBAL_BATCH / WORLD_SIZE))
     fi
     ;;
   throughput)
@@ -99,7 +110,7 @@ case "$BATCH_POLICY" in
       exit 1
     fi
     if [[ "$GLOBAL_BATCH" == "auto" ]]; then
-      GLOBAL_BATCH=$((MICRO_BATCH * NUM_GPUS))
+      GLOBAL_BATCH=$((MICRO_BATCH * WORLD_SIZE))
     fi
     if ! is_positive_integer "$GLOBAL_BATCH"; then
       echo "GLOBAL_BATCH must be a positive integer" >&2
@@ -121,8 +132,8 @@ if ! is_positive_integer "$GLOBAL_BATCH" || ! is_positive_integer "$MICRO_BATCH"
   echo "GLOBAL_BATCH and MICRO_BATCH must be positive integers" >&2
   exit 1
 fi
-if (( GLOBAL_BATCH % (MICRO_BATCH * NUM_GPUS) != 0 )); then
-  echo "GLOBAL_BATCH must be divisible by MICRO_BATCH * NUM_GPUS" >&2
+if (( GLOBAL_BATCH % (MICRO_BATCH * WORLD_SIZE) != 0 )); then
+  echo "GLOBAL_BATCH must be divisible by MICRO_BATCH * WORLD_SIZE" >&2
   exit 1
 fi
 if [[ "$ACTIVATION_CHECKPOINT_EVERY" == "auto" ]]; then
@@ -149,16 +160,18 @@ if [[ "$shard_count" -ne 40 ]]; then
 fi
 
 mkdir -p "$RUN_ROOT"
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"$RUN_ROOT/.train.lock"
-  if ! flock -n 9; then
-    echo "another training process already holds $RUN_ROOT/.train.lock" >&2
+if (( NODE_RANK == 0 )); then
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$RUN_ROOT/.train.lock"
+    if ! flock -n 9; then
+      echo "another training process already holds $RUN_ROOT/.train.lock" >&2
+      exit 1
+    fi
+  elif [[ "${ALLOW_NO_RUN_LOCK:-0}" != "1" ]]; then
+    echo "flock is required to protect RUN_ROOT from concurrent writers" >&2
+    echo "set ALLOW_NO_RUN_LOCK=1 only if the cluster provides external locking" >&2
     exit 1
   fi
-elif [[ "${ALLOW_NO_RUN_LOCK:-0}" != "1" ]]; then
-  echo "flock is required to protect RUN_ROOT from concurrent writers" >&2
-  echo "set ALLOW_NO_RUN_LOCK=1 only if the cluster provides external locking" >&2
-  exit 1
 fi
 if [[ -s "$RUN_ROOT/latest.pt" ]]; then
   RESUME="$RUN_ROOT/latest.pt"
@@ -170,29 +183,38 @@ if [[ ! -s "$RESUME" ]]; then
   exit 1
 fi
 
-runtime_args=(--visible-gpus "$NUM_GPUS")
+runtime_args=(--visible-gpus "$GPUS_PER_NODE")
 if [[ "$REQUIRE_H200" == "1" ]]; then
   runtime_args+=(--require-h200)
 fi
 "$PYTHON" "$ROOT/scripts/check_runtime.py" "${runtime_args[@]}"
 "$PYTHON" "$ROOT/scripts/validate_checkpoint.py" "$RESUME"
-"$PYTHON" "$ROOT/scripts/check_run_contract.py" \
-  --run-root "$RUN_ROOT" \
-  --batch-policy "$BATCH_POLICY" \
-  --global-batch "$GLOBAL_BATCH"
+if (( NODE_RANK == 0 )); then
+  "$PYTHON" "$ROOT/scripts/check_run_contract.py" \
+    --run-root "$RUN_ROOT" \
+    --batch-policy "$BATCH_POLICY" \
+    --global-batch "$GLOBAL_BATCH"
+fi
 
 if [[ "$BATCH_POLICY" == "throughput" && "$GLOBAL_BATCH" != "512" ]]; then
   echo "WARNING: global batch is $GLOBAL_BATCH; this is not baseline-equivalent" >&2
 fi
-echo "launch: gpus=$NUM_GPUS policy=$BATCH_POLICY global_batch=$GLOBAL_BATCH \
+echo "launch: node_rank=$NODE_RANK/$NNODES gpus_per_node=$GPUS_PER_NODE world_size=$WORLD_SIZE \
+master=$MASTER_ADDR:$MASTER_PORT policy=$BATCH_POLICY global_batch=$GLOBAL_BATCH \
 micro_batch=$MICRO_BATCH activation_checkpoint_every=$ACTIVATION_CHECKPOINT_EVERY \
-workers_per_rank=$WORKERS resume=$RESUME"
+workers_per_rank=$WORKERS data_partitions=$DATA_PARTITIONS resume=$RESUME"
 
 export PYTHONSAFEPATH=1
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export NNODES NODE_RANK GPUS_PER_NODE MASTER_ADDR MASTER_PORT WORLD_SIZE
 
-"$PYTHON" -m torch.distributed.run --standalone --nproc-per-node="$NUM_GPUS" \
+"$PYTHON" -m torch.distributed.run \
+  --nnodes="$NNODES" \
+  --node-rank="$NODE_RANK" \
+  --nproc-per-node="$GPUS_PER_NODE" \
+  --master-addr="$MASTER_ADDR" \
+  --master-port="$MASTER_PORT" \
   -m research.diffusion_loop.imagenet.elt_fixed.train \
   --data "$DATA_ROOT" \
   --output "$RUN_ROOT" \

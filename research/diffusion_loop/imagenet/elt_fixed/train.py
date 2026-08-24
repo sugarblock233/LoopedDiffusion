@@ -91,9 +91,17 @@ def sigmoid_elbo_from_v(
 @torch.no_grad()
 def update_ema(ema: torch.nn.Module, model: torch.nn.Module, decay: float) -> None:
     source = model.module if isinstance(model, DDP) else model
-    for target, current in zip(ema.parameters(), source.parameters(), strict=True):
+    ema_parameters = tuple(ema.parameters())
+    source_parameters = tuple(source.parameters())
+    if len(ema_parameters) != len(source_parameters):
+        raise ValueError("EMA and source parameter counts do not match")
+    for target, current in zip(ema_parameters, source_parameters):
         target.mul_(decay).add_(current.detach(), alpha=1.0 - decay)
-    for target, current in zip(ema.buffers(), source.buffers(), strict=True):
+    ema_buffers = tuple(ema.buffers())
+    source_buffers = tuple(source.buffers())
+    if len(ema_buffers) != len(source_buffers):
+        raise ValueError("EMA and source buffer counts do not match")
+    for target, current in zip(ema_buffers, source_buffers):
         target.copy_(current)
 
 
@@ -163,6 +171,8 @@ def main() -> None:
     config.update(model.module.metadata())
     config.update(
         {
+            "gpus_per_node": int(os.environ.get("LOCAL_WORLD_SIZE", world)),
+            "nnodes": int(os.environ.get("NNODES", "1")),
             "world_size": world,
             "gradient_accumulation": accumulation,
             "data_seed": data_seed,

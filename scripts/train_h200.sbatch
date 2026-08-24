@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=looped-dit-fixed
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=72:00:00
@@ -10,9 +10,12 @@
 
 set -euo pipefail
 
-# The GPU request is deliberately supplied at submission time so the same
-# batch file can run on any one-node H200 allocation.
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Node and GPU requests are deliberately supplied at submission time.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  ROOT="$(cd "$SLURM_SUBMIT_DIR" && pwd)"
+else
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
 cd "$ROOT"
 
 if [[ -z "${DATA_ROOT:-}" ]]; then
@@ -27,5 +30,9 @@ export BATCH_POLICY="${BATCH_POLICY:-fixed}"
 export CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-5000}"
 export WORKERS="${WORKERS:-auto}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export NNODES="${NNODES:-${SLURM_NNODES:-1}}"
+export MASTER_ADDR="${MASTER_ADDR:-$(scontrol show hostnames "$SLURM_JOB_NODELIST" | sed -n '1p')}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
 
-srun --ntasks=1 --kill-on-bad-exit=1 bash "$ROOT/scripts/train_h200.sh"
+srun --nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1 \
+  --kill-on-bad-exit=1 bash "$ROOT/scripts/train_h200.sh"

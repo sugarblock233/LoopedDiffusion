@@ -128,6 +128,22 @@ GPU_REQUEST_STYLE=gres bash scripts/submit_h200.sh 4 --partition=<partition>
 GPU_TYPE='' bash scripts/submit_h200.sh 4 --partition=<partition> --constraint=h200
 ```
 
+For a multi-node job, pass the node count followed by GPUs per node. All nodes
+must see `DATA_ROOT`, `RUN_ROOT`, and the checkpoint at the same paths, so use
+fast shared or parallel storage rather than node-local scratch:
+
+```bash
+DATA_ROOT="$SCRATCH/looped-diffusion/imagenet_sd14_latents" \
+RUN_ROOT="$SCRATCH/looped-diffusion/runs/fixed_2nodes_8gpus" \
+  bash scripts/submit_h200.sh 2 8 --partition=<h200-partition>
+```
+
+The batch script starts one supervisor per node and derives the rendezvous
+address from the first allocated hostname. `MASTER_PORT` defaults to `29500`
+and may be overridden if the cluster reserves or filters that port. Nodes must
+be able to reach that TCP port. If NCCL chooses the wrong network interface,
+set the cluster-appropriate `NCCL_SOCKET_IFNAME` when submitting the job.
+
 Use `DRY_RUN=1` to print the complete `sbatch` command without submitting it.
 The older `train_h200_single.sbatch` entry point remains available for
 backward compatibility.
@@ -138,8 +154,9 @@ Defaults:
 - train to 400K steps;
 - global batch 512;
 - one optimizer pass per step, with micro-batch set to `512 / GPU count`;
-- eight data-loader workers in total, divided across ranks to retain the
-  original baseline's uniform 40-shard partition;
+- a target of eight data-loader workers in total, with at least one worker per
+  rank; logical shard splitting keeps all 40 shards uniformly sampled when the
+  rank/worker count does not divide 40;
 - selective activation checkpointing on a 512 micro-batch and no checkpointing
   on smaller per-GPU micro-batches;
 - save every 5K steps for Slurm preemption recovery.
@@ -153,6 +170,9 @@ global batch is divided:
 | 2 | 256 | 4 | 512 |
 | 4 | 128 | 2 | 512 |
 | 8 | 64 | 1 | 512 |
+
+The same batch rule uses the global rank count across nodes. For example, two
+8-GPU nodes use 16 ranks and a micro-batch of 32 at global batch 512.
 
 This keeps step count, sample count, learning rate, and EMA semantics aligned
 with the existing baseline. The GPU count must divide 512; if three GPUs are
@@ -225,10 +245,30 @@ Inside an allocated one-node Slurm shell, or on a standalone H200 node:
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 DATA_ROOT=/path/to/imagenet_sd14_latents \
 RUN_ROOT=/path/to/run \
-NUM_GPUS=4 \
+GPUS_PER_NODE=4 \
   bash scripts/train_h200.sh
 ```
 
-`NUM_GPUS=auto` detects all GPUs visible to PyTorch. Limit
+`GPUS_PER_NODE=auto` detects all GPUs visible to PyTorch. Limit
 `CUDA_VISIBLE_DEVICES` first if the allocation exposes devices that should not
 belong to this run.
+
+For a direct multi-node launch, run the command once on every node with the
+same `NNODES`, `MASTER_ADDR`, and `MASTER_PORT`, and a unique zero-based
+`NODE_RANK`. For example, on node 0 and node 1 respectively:
+
+```bash
+# node 0
+NNODES=2 NODE_RANK=0 GPUS_PER_NODE=8 \
+MASTER_ADDR=node0.example MASTER_PORT=29500 \
+DATA_ROOT=/shared/latents RUN_ROOT=/shared/run bash scripts/train_h200.sh
+
+# node 1
+NNODES=2 NODE_RANK=1 GPUS_PER_NODE=8 \
+MASTER_ADDR=node0.example MASTER_PORT=29500 \
+DATA_ROOT=/shared/latents RUN_ROOT=/shared/run bash scripts/train_h200.sh
+```
+
+If one node exits during training, `srun --kill-on-bad-exit` terminates the
+remaining supervisors. Re-submit the job to resume from `latest.pt`; only
+global rank zero writes logs and checkpoints.

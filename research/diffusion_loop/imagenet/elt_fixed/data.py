@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import math
 import random
 import tarfile
 from collections.abc import Iterator
@@ -111,6 +112,28 @@ def iter_parquet_encoded_batches(
         yield images, torch.tensor(labels, dtype=torch.int64)
 
 
+def partition_shards(
+    shards: list[Path], partition_id: int, partitions: int
+) -> list[tuple[Path, int, int]]:
+    """Assign every sample once while giving each partition equal logical slots.
+
+    When the shard count is not divisible by the number of consumers, shards
+    are split between multiple consumers. This avoids the sampling bias caused
+    by making some ranks cycle through fewer complete shards than others.
+    """
+    if not shards:
+        raise ValueError("shards must not be empty")
+    if partitions < 1 or not 0 <= partition_id < partitions:
+        raise ValueError("partition_id must be in [0, partitions)")
+    replicas = partitions // math.gcd(len(shards), partitions)
+    slots = [
+        (shard, replica, replicas)
+        for shard in shards
+        for replica in range(replicas)
+    ]
+    return slots[partition_id::partitions]
+
+
 class LatentShardDataset(IterableDataset):
     def __init__(self, root: Path | str, *, seed: int = 0, flip_probability: float = 0.5) -> None:
         super().__init__()
@@ -118,7 +141,7 @@ class LatentShardDataset(IterableDataset):
         self.seed = int(seed)
         self.flip_probability = float(flip_probability)
 
-    def _partition(self) -> tuple[list[Path], int, int]:
+    def _partition(self) -> list[tuple[Path, int, int]]:
         shards = sorted(self.root.glob("train-*.pt"))
         if not shards:
             raise FileNotFoundError(f"no latent shards under {self.root}")
@@ -132,15 +155,10 @@ class LatentShardDataset(IterableDataset):
         workers = 1 if worker is None else worker.num_workers
         partition_id = rank * workers + worker_id
         partitions = world * workers
-        if len(shards) >= partitions:
-            return shards[partition_id::partitions], 0, 1
-        shard_id = partition_id % len(shards)
-        sample_partition = partition_id // len(shards)
-        sample_partitions = (partitions - 1 - shard_id) // len(shards) + 1
-        return [shards[shard_id]], sample_partition, sample_partitions
+        return partition_shards(shards, partition_id, partitions)
 
     def __iter__(self):
-        shards, sample_partition, sample_partitions = self._partition()
+        shard_slots = self._partition()
         worker = get_worker_info()
         worker_id = 0 if worker is None else worker.id
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
@@ -148,9 +166,9 @@ class LatentShardDataset(IterableDataset):
         epoch = 0
         while True:
             rng = random.Random(self.seed + 1_000_003 * epoch + partition_id)
-            order = list(shards)
+            order = list(shard_slots)
             rng.shuffle(order)
-            for shard in order:
+            for shard, sample_partition, sample_partitions in order:
                 payload = torch.load(shard, map_location="cpu", weights_only=True)
                 moments = payload["moments"]
                 labels = payload["labels"]
@@ -169,5 +187,6 @@ __all__ = [
     "center_crop",
     "iter_parquet_encoded_batches",
     "iter_parquet_batches",
+    "partition_shards",
     "read_image_shard",
 ]
